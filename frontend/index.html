@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>רחפן לשרטוט – מדידות</title>
+<link rel="stylesheet" href="vendor/leaflet.min.css">
+<link rel="stylesheet" href="vendor/leaflet-geoman.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">✈︎ רחפן ← שרטוט</div>
+  <select id="projSelect"><option value="">— בחר פרויקט —</option></select>
+  <button id="btnNew">פרויקט חדש</button>
+  <span class="spacer"></span>
+  <span id="status" class="status"></span>
+  <button id="btnDxf" class="primary" disabled>ייצוא DXF</button>
+  <button id="btnZip" disabled title="DXF + אורתופוטו מקושר + קובץ נקודות PNEZD + דוח דיוק">חבילה מלאה (ZIP)</button>
+</header>
+
+<main>
+  <aside id="panel">
+    <nav class="tabs">
+      <button data-tab="draw" class="active">שרטוט</button>
+      <button data-tab="data">נתונים</button>
+      <button data-tab="control">בקרה ודיוק</button>
+      <button data-tab="auto">רומים וקווי גובה</button>
+      <button data-tab="meta">פרטי מפה</button>
+    </nav>
+
+    <section id="tab-draw" class="tab active">
+      <input id="codeSearch" placeholder="חיפוש קוד (למשל: אבן שפה, CURB)…">
+      <div id="codeList"></div>
+      <div class="hint">
+        בחר קוד ← לחץ על האורתופוטו לשרטוט. סיום קו: לחיצה כפולה / Enter.<br>
+        <b>Esc</b> ביטול · <b>Ctrl+Z</b> מחיקת אחרון · <b>E</b> עריכת קודקודים · <b>Del</b> מחיקת אובייקט נבחר · הצמדה (Snap) פעילה
+      </div>
+      <div id="selInfo" class="card hidden"></div>
+      <h4>אובייקטים בשרטוט <span id="featCount"></span></h4>
+      <div id="featSummary" class="small"></div>
+    </section>
+
+    <section id="tab-data" class="tab">
+      <p class="small">העלה תוצרים מתוכנת העיבוד (Pix4D, DJI Terra, Metashape, ODM). קבצים במערכת אחרת יומרו אוטומטית לרשת ישראל החדשה.</p>
+      <label class="file">אורתופוטו (GeoTIFF)<input type="file" data-kind="ortho" accept=".tif,.tiff"></label>
+      <label class="file">DSM – מודל פני שטח (GeoTIFF)<input type="file" data-kind="dsm" accept=".tif,.tiff"></label>
+      <label class="file">DTM – מודל קרקע (אופציונלי, מומלץ)<input type="file" data-kind="dtm" accept=".tif,.tiff"></label>
+      <div id="rasterInfo" class="small"></div>
+      <hr>
+      <h4>או: עיבוד תמונות גולמיות (OpenDroneMap)</h4>
+      <p class="small">דורש שרת NodeODM פעיל (ראה README). מומלץ לצרף קובץ gcp_list.txt ברשת ישראל.</p>
+      <label class="file">תמונות רחפן (JPG)<input id="odmImages" type="file" multiple accept=".jpg,.jpeg,.JPG,.tif"></label>
+      <label class="file">קובץ GCP (אופציונלי)<input id="odmGcp" type="file" accept=".txt"></label>
+      <select id="odmQuality"><option value="high">איכות גבוהה (2 ס"מ)</option><option value="fast">מהיר (5 ס"מ)</option></select>
+      <button id="btnOdm">שלח לעיבוד</button>
+      <div id="odmStatus" class="small"></div>
+    </section>
+
+    <section id="tab-control" class="tab">
+      <p class="small">קובץ נקודות: <code>שם,E,N,H[,gcp|check]</code>. נקודות ביקורת (check) משמשות לבדיקת דיוק בלתי תלויה.</p>
+      <label class="file">טעינת נקודות בקרה/ביקורת (CSV/TXT)<input id="ctrlFile" type="file" accept=".csv,.txt"></label>
+      <label class="chk"><input id="swapEN" type="checkbox"> הקובץ בסדר N,E (להחליף)</label>
+      <div id="accSummary" class="card"></div>
+      <table id="ctrlTable" class="tbl"></table>
+      <p class="small">למדידת סטייה מישורית: לחץ "סמן" ואז לחץ על מרכז המטרה באורתופוטו.</p>
+      <button id="btnApplyOffset">החל תיקון גובה (ממוצע dH של נקודות הבקרה)</button>
+      <button id="btnClearOffset">אפס תיקון</button>
+    </section>
+
+    <section id="tab-auto" class="tab">
+      <label>אזור עבודה <select id="genArea"><option value="">כל השטח</option></select></label>
+      <label>מרווח רשת רומים (מ') <input id="genSpot" type="number" value="10" step="1" min="0"></label>
+      <label>מרווח קווי גובה (מ') <input id="genInt" type="number" value="0.5" step="0.1" min="0"></label>
+      <label>קו ראשי כל <input id="genMajor" type="number" value="5" min="1"> קווים</label>
+      <label>החלקה (מ') <input id="genSmooth" type="number" value="1" step="0.25" min="0"></label>
+      <p class="small">הגבהים נלקחים מה־DTM אם קיים (קרקע בלבד), אחרת מה־DSM. מומלץ להגדיר גבול אזור עבודה (קוד AREA) כדי לא ליצור קווים על גגות ועצים.</p>
+      <button id="btnGen" class="primary">צור רומים וקווי גובה</button>
+      <div id="genStatus" class="small"></div>
+    </section>
+
+    <section id="tab-meta" class="tab">
+      <label>שם פרויקט <input id="mName"></label>
+      <label>קנה מידה 1: <select id="mScale"><option>100</option><option selected>250</option><option>500</option><option>1000</option><option>2500</option></select></label>
+      <label>מזמין <input id="mClient" data-meta="client"></label>
+      <label>גוש / חלקה <input id="mParcel" data-meta="parcel"></label>
+      <label>מודד מוסמך <input id="mSurveyor" data-meta="surveyor"></label>
+      <label>מס' רישיון <input id="mLicense" data-meta="license"></label>
+      <label>תאריך מדידה <input id="mDate" type="date" data-meta="date"></label>
+      <label>מקור גובה <input id="mDatum" data-meta="datum" placeholder="גובה אורתומטרי מעל פני הים"></label>
+      <button id="btnSaveMeta" class="primary">שמור</button>
+    </section>
+  </aside>
+
+  <div id="mapWrap">
+    <div id="map"></div>
+    <div id="layersCtl" class="overlay">
+      <label><input type="checkbox" id="lyOrtho" checked> אורתופוטו</label>
+      <label><input type="checkbox" id="lyDem"> מודל גבהים</label>
+      <label><input type="checkbox" id="lyGen" checked> רומים וקווי גובה</label>
+      <label><input type="checkbox" id="lyCtrl" checked> נקודות בקרה</label>
+    </div>
+    <div id="coords" class="overlay">E: — N: — Z: —</div>
+    <div id="empty" class="overlay center">צור פרויקט חדש או בחר קיים, ואז העלה אורתופוטו ו־DSM בלשונית "נתונים".</div>
+  </div>
+</main>
+
+<script src="vendor/leaflet.min.js"></script>
+<script src="vendor/leaflet-geoman.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

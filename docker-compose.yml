@@ -1,0 +1,13 @@
+# מפעיל את האפליקציה + שרת עיבוד תמונות OpenDroneMap (NodeODM)
+services:
+  app:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      - NODEODM_URL=http://nodeodm:3000
+      - DSC_DATA=/data
+    volumes: ["./data:/data"]
+    depends_on: [nodeodm]
+  nodeodm:
+    image: opendronemap/nodeodm:latest
+    ports: ["3000:3000"]
