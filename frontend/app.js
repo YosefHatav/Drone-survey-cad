@@ -62,6 +62,8 @@ async function openProject(pid) {
   renderControl(await api(`/api/projects/${pid}/accuracy`));
   renderGenerated(await api(`/api/projects/${pid}/generated`));
   ['#btnDxf', '#btnZip'].forEach(s => $(s).disabled = false);
+  codes = proj.codes; codeMap = {}; codes.forEach(c => codeMap[c.code] = c); renderCodes();
+  renderCad();
 }
 
 function buildMap() {
@@ -331,6 +333,20 @@ function bindUI() {
     proj = { ...proj, ...(await api(`/api/projects/${proj.id}`, jsonOpts('PATCH', { name: $('#mName').value, scale: +$('#mScale').value, meta }))) };
     await refreshProjects(); status('נשמר');
   };
+  $('#tplFile').onchange = async () => {
+    const fd = new FormData(); fd.append('file', $('#tplFile').files[0]);
+    status('קורא תבנית…', 0);
+    try { await api(`/api/projects/${proj.id}/template`, { method: 'POST', body: fd }); status('התבנית נטענה, הקודים מופו אוטומטית. בדוק את הטבלה.', 6000); await openProject(proj.id); }
+    catch (err) { status('שגיאה: ' + err.message, 10000); }
+    $('#tplFile').value = '';
+  };
+  $('#cadStrict').onchange = $('#cadIgnore').onchange = () => api(`/api/projects/${proj.id}/cad`, jsonOpts('PATCH', { strict: $('#cadStrict').checked, ignore_layer: $('#cadIgnore').value }));
+  $('#btnSaveMap').onclick = async () => {
+    const items = [...document.querySelectorAll('#mapTable tr[data-code]')].map(tr => ({ code: tr.dataset.code, layer: tr.querySelector('.mLayer').value,
+      ...(tr.querySelector('.mBlock') ? { block: tr.querySelector('.mBlock').value } : {}) }));
+    proj.codes = await api(`/api/projects/${proj.id}/codes`, jsonOpts('PATCH', items));
+    codes = proj.codes; codeMap = {}; codes.forEach(c => codeMap[c.code] = c); renderCodes(); status('המיפוי נשמר');
+  };
   $('#btnOdm').onclick = async () => {
     const imgs = $('#odmImages').files; if (!imgs.length) { status('בחר תמונות'); return; }
     const fd = new FormData(); [...imgs].forEach(f => fd.append('images', f));
@@ -352,6 +368,21 @@ function bindUI() {
     else if (e.key.toLowerCase() === 'e' && selected) featLayers[selected].pm.toggleEdit({ snappable: true });
     else if (/^[1-9]$/.test(e.key) && codes[+e.key - 1]) selectCode(codes[+e.key - 1].code);
   });
+}
+/* ------------------------------------------------------------ CAD template / standard */
+async function renderCad() {
+  const cad = await api(`/api/projects/${proj.id}/cad`);
+  const tpl = await api(`/api/projects/${proj.id}/template`);
+  $('#cadStrict').checked = !!cad.strict; $('#cadIgnore').value = cad.ignore_layer || '1201';
+  $('#tplInfo').innerHTML = cad.template ? `✓ תבנית: ${esc(cad.template.name)} · ${tpl.layers.length} שכבות · ${tpl.blocks.length} בלוקים <button id="tplDel">הסר</button>` :
+    'לא נטענה תבנית: נעשה שימוש בשכבות ברירת המחדל (TOPO-*/SURV-*).' + (cad.dwg_available ? '' : '<br>ייצוא DWG ישיר: לא זמין (ODA File Converter לא מותקן), הייצוא הוא DXF.');
+  if ($('#tplDel')) $('#tplDel').onclick = async () => { await api(`/api/projects/${proj.id}/template`, { method: 'DELETE' }); openProject(proj.id); };
+  const layerNames = [...new Set([...tpl.layers.map(l => l.name), ...codes.map(c => c.layer)])].sort();
+  const blockNames = ['', ...tpl.blocks.map(b => b.name), 'SYM_SPOT', 'SYM_POLE', 'SYM_TREE', 'SYM_MH', 'SYM_HYD', 'SYM_SIGN', 'SYM_GCP'];
+  const opt = (arr, cur) => arr.map(n => `<option ${n === cur ? 'selected' : ''} value="${esc(n)}">${esc(n || '—')}</option>`).join('');
+  $('#mapTable').innerHTML = '<tr><th>קוד</th><th>שכבה</th><th>בלוק</th></tr>' + codes.map(c => `<tr data-code="${c.code}">
+    <td title="${esc(c.label)}">${c.code}</td><td><select class="mLayer">${opt(layerNames, c.layer)}</select></td>
+    <td>${c.geom === 'point' ? `<select class="mBlock">${opt([...new Set(blockNames)], c.block || '')}</select>` : ''}</td></tr>`).join('');
 }
 async function setOffset(off) {
   proj = await api(`/api/projects/${proj.id}`, jsonOpts('PATCH', { vertical_offset: off }));

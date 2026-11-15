@@ -1,6 +1,14 @@
-"""DXF writer: produces an AutoCAD-ready drawing (R2018 DXF) in project coordinates
-with layers, symbol blocks with elevation attributes, 3D polylines, contours,
-coordinate grid, title block and a referenced orthophoto."""
+"""DXF writer: produces an AutoCAD-ready drawing in project coordinates with layers,
+symbol blocks with elevation attributes, 3D polylines, contours, coordinate grid,
+title block and a referenced orthophoto.
+
+Two options shape the output:
+* template  – an office DXF (layers, blocks, text styles). Its layers/blocks are reused,
+              its model space content is discarded.
+* strict    – "מבא"ת / מפרט מיפוי לאומי" drafting rules: no POINT/TEXT/MTEXT/CIRCLE
+              entities in model space (all labels are blocks with attributes), colours
+              ByLayer, HEBTXT font, 6-decimal precision, -444 for unknown values, sheet
+              frame / title / north arrow on a non-printing ("ignore") layer."""
 import datetime
 import math
 
@@ -9,9 +17,10 @@ from ezdxf.enums import TextEntityAlignment
 
 from codes import codes_by_key
 
+MISSING = -444.0
+
 EXTRA_LAYERS = [
     ("TOPO-POINTS", 7, "נקודות גובה תלת־ממדיות (לבניית משטח)"),
-    ("TOPO-SPOT-TEXT", 7, "כיתוב רומים"),
     ("TOPO-CONTOUR-MAJOR", 34, "קווי גובה ראשיים"),
     ("TOPO-CONTOUR-MINOR", 252, "קווי גובה משניים"),
     ("TOPO-CONTOUR-TEXT", 34, "כיתוב קווי גובה"),
@@ -22,188 +31,288 @@ EXTRA_LAYERS = [
     ("TOPO-TEXT", 7, "כיתובים"),
 ]
 
-
-def _sym(doc, name, draw):
-    blk = doc.blocks.new(name=name)
-    draw(blk)
-    blk.add_attdef("ELEV", (0.7, 0.3), dxfattribs={"height": 0.5, "layer": "0", "style": "SURVEY"})
-    blk.add_attdef("CODE", (0.7, -0.5), dxfattribs={"height": 0.35, "layer": "0", "style": "SURVEY",
-                                                      "flags": 1})  # invisible
-    return blk
+ELEV_TAGS = {"ELEV", "Z", "H", "HEIGHT", "LEVEL", "גובה", "רום", "HGT", "ELEVATION"}
+CODE_TAGS = {"CODE", "DESC", "DESCRIPTION", "קוד", "תיאור"}
+NAME_TAGS = {"NAME", "ID", "NUM", "NUMBER", "POINT", "שם", "מספר"}
+TEXT_TAGS = {"TEXT", "LABEL", "TXT", "כיתוב", "טקסט"}
 
 
-def _define_blocks(doc):
-    # Unit-size symbols (≈1 drawing unit), scaled at insert by the drawing scale.
-    _sym(doc, "SYM_SPOT", lambda b: (b.add_line((-0.25, 0), (0.25, 0)), b.add_line((0, -0.25), (0, 0.25))))
-    _sym(doc, "SYM_POLE", lambda b: (b.add_circle((0, 0), 0.3), b.add_line((-0.3, 0), (0.3, 0)),
-                                     b.add_line((0, -0.3), (0, 0.3))))
-
-    def tree(b):
-        b.add_circle((0, 0), 0.5)
-        b.add_circle((0, 0), 0.08)
-        for k in range(8):
-            a = k * math.pi / 4
-            b.add_line((0.5 * math.cos(a), 0.5 * math.sin(a)), (0.65 * math.cos(a), 0.65 * math.sin(a)))
-    _sym(doc, "SYM_TREE", tree)
-    _sym(doc, "SYM_MH", lambda b: (b.add_lwpolyline([(-0.3, -0.3), (0.3, -0.3), (0.3, 0.3), (-0.3, 0.3)], close=True),
-                                   b.add_line((-0.3, -0.3), (0.3, 0.3)), b.add_line((-0.3, 0.3), (0.3, -0.3))))
-    _sym(doc, "SYM_HYD", lambda b: (b.add_circle((0, 0), 0.3), b.add_circle((0, 0), 0.12)))
-    _sym(doc, "SYM_SIGN", lambda b: (b.add_lwpolyline([(-0.3, 0), (0.3, 0), (0, 0.5)], close=True),
-                                     b.add_line((0, 0), (0, -0.3))))
-    _sym(doc, "SYM_GCP", lambda b: (b.add_lwpolyline([(-0.4, -0.25), (0.4, -0.25), (0, 0.45)], close=True),
-                                    b.add_circle((0, 0), 0.05)))
+def default_options():
+    return {"strict": False, "ignore_layer": "1201", "text_style_font": "arial.ttf",
+            "hebrew_font": "david.ttf", "layer_map": {}}
 
 
-def build_dxf(project, features, out_path, contours=None, spots=None, ortho_ref=None,
-              checks=None):
-    """project: dict with name, epsg, scale, meta; features: list of dicts
-    {code, geom: point|line|polygon, coords:[[e,n,z],...], text?}."""
-    codes = codes_by_key(project["codes"])
-    scale = float(project.get("scale", 250))
-    k = scale / 1000.0                  # drawing units (m) per paper mm
-    txt_h = 2.0 * k                     # 2 mm text on paper
-    sym = 2.5 * k                       # ~2.5 mm symbols
-
-    doc = ezdxf.new("R2018", setup=True)
-    doc.units = ezdxf.units.M
-    doc.header["$INSUNITS"] = 6
-    doc.header["$MEASUREMENT"] = 1
-    doc.header["$LUNITS"] = 2
-    doc.header["$LUPREC"] = 3
-    doc.styles.new("SURVEY", dxfattribs={"font": "arial.ttf"})
-    doc.styles.new("HEBREW", dxfattribs={"font": "david.ttf"})
-
-    for c in project["codes"]:
-        if c["layer"] not in doc.layers:
-            lay = doc.layers.add(c["layer"], color=c["color"])
-            lay.description = c["label"]
-    for name, color, desc in EXTRA_LAYERS:
-        if name not in doc.layers:
-            lay = doc.layers.add(name, color=color)
-            lay.description = desc
-    if "TOPO-FENCE" in doc.layers and "DASHED" in doc.linetypes:
-        doc.layers.get("TOPO-FENCE").dxf.linetype = "DASHED"
-    _define_blocks(doc)
-    msp = doc.modelspace()
-
-    if ortho_ref:
-        img_path, (w, h), insert, size = ortho_ref
-        image_def = doc.add_image_def(filename=img_path, size_in_pixel=(w, h))
-        img = msp.add_image(image_def, insert=insert, size_in_units=size, rotation=0,
-                            dxfattribs={"layer": "ORTHO"})
-        img.dxf.flags = 1 | 2 | 8  # show, show unaligned, use clip
-
-    n_written = 0
-    for f in features:
-        c = codes.get(f["code"])
-        if not c:
-            continue
-        layer = c["layer"]
-        pts = [tuple(p) if len(p) == 3 and p[2] is not None else (p[0], p[1], 0.0) for p in f["coords"]]
-        if f["geom"] == "point":
-            e, n, z = pts[0]
-            blk = c.get("block") or "SYM_SPOT"
-            ref = msp.add_blockref(blk, (e, n, z), dxfattribs={"layer": layer, "xscale": sym, "yscale": sym,
-                                                               "zscale": sym})
-            ref.add_auto_attribs({"ELEV": f"{z:.2f}", "CODE": f["code"]})
-            msp.add_point((e, n, z), dxfattribs={"layer": "TOPO-POINTS"})
+class Writer:
+    def __init__(self, project, template=None):
+        self.p = project
+        self.opt = {**default_options(), **project.get("cad", {})}
+        self.strict = bool(self.opt["strict"])
+        self.lmap = self.opt.get("layer_map") or {}          # internal extra layer -> office layer
+        scale = float(project.get("scale", 250))
+        self.scale = scale
+        self.k = scale / 1000.0                               # metres per paper mm
+        self.txt_h = 2.0 * self.k
+        self.sym = 2.5 * self.k
+        if template:
+            self.doc = ezdxf.readfile(template)
+            msp = self.doc.modelspace()
+            for e in list(msp):
+                msp.delete_entity(e)
         else:
-            closed = f["geom"] == "polygon"
-            msp.add_polyline3d(pts, close=closed, dxfattribs={"layer": layer})
-        if f.get("text"):
-            e, n, _ = pts[0]
-            msp.add_text(f["text"], height=txt_h, dxfattribs={"layer": "TOPO-TEXT", "style": "HEBREW"}
-                         ).set_placement((e, n + txt_h), align=TextEntityAlignment.BOTTOM_LEFT)
-        n_written += 1
+            self.doc = ezdxf.new("R2018", setup=True)
+        d = self.doc
+        d.units = ezdxf.units.M
+        d.header["$INSUNITS"] = 6
+        d.header["$MEASUREMENT"] = 1
+        d.header["$LUNITS"] = 2
+        d.header["$LUPREC"] = 6 if self.strict else 3
+        if self.strict:
+            self.style = self.hstyle = "HEBTXT"
+            if "HEBTXT" not in d.styles:
+                d.styles.new("HEBTXT", dxfattribs={"font": "hebtxt.shx"})
+        else:
+            self.style, self.hstyle = "SURVEY", "HEBREW"
+            if "SURVEY" not in d.styles:
+                d.styles.new("SURVEY", dxfattribs={"font": self.opt["text_style_font"]})
+            if "HEBREW" not in d.styles:
+                d.styles.new("HEBREW", dxfattribs={"font": self.opt["hebrew_font"]})
+        for c in project["codes"]:
+            self._layer(c["layer"], c["color"], c["label"])
+        for name, color, desc in EXTRA_LAYERS:
+            self._layer(self.L(name), color, desc)
+        if self.strict:
+            self._layer(self.opt["ignore_layer"], 7, "שכבת התעלם – לא מודפסת (מסגרת, כותרת, חץ צפון)")
+        if not template and "DASHED" in d.linetypes:
+            fence = codes_by_key(project["codes"]).get("FENCE")
+            if fence and fence["layer"] in d.layers:
+                d.layers.get(fence["layer"]).dxf.linetype = "DASHED"
+        self._define_blocks()
+        self.msp = d.modelspace()
 
-    for e, n, z in spots or []:
-        ref = msp.add_blockref("SYM_SPOT", (e, n, z), dxfattribs={"layer": "TOPO-SPOT", "xscale": sym,
-                                                                  "yscale": sym, "zscale": sym})
-        ref.add_auto_attribs({"ELEV": f"{z:.2f}", "CODE": "SPOT"})
-        msp.add_point((e, n, z), dxfattribs={"layer": "TOPO-POINTS"})
+    # ---------------------------------------------------------------- helpers
+    def L(self, name):
+        return self.lmap.get(name, name)
 
-    for cl in contours or []:
-        layer = "TOPO-CONTOUR-MAJOR" if cl["major"] else "TOPO-CONTOUR-MINOR"
-        pl = msp.add_lwpolyline(cl["coords"], dxfattribs={"layer": layer, "elevation": cl["z"]})
-        if cl["major"] and len(cl["coords"]) > 10:
-            i = len(cl["coords"]) // 2
-            (x1, y1), (x2, y2) = cl["coords"][i - 1], cl["coords"][i + 1]
-            ang = math.degrees(math.atan2(y2 - y1, x2 - x1))
-            if ang > 90 or ang < -90:
-                ang += 180
-            msp.add_text(f"{cl['z']:.1f}", height=txt_h * 0.9, rotation=ang,
-                         dxfattribs={"layer": "TOPO-CONTOUR-TEXT", "style": "SURVEY", "elevation": cl["z"]}
-                         ).set_placement(cl["coords"][i], align=TextEntityAlignment.MIDDLE_CENTER)
-        del pl
+    def _layer(self, name, color, desc):
+        if name not in self.doc.layers:
+            lay = self.doc.layers.add(name, color=color)
+            lay.description = desc
 
-    for ck in checks or []:
-        if ck.get("measured") is None:
+    def _sym(self, name, draw):
+        if name in self.doc.blocks:
+            return
+        blk = self.doc.blocks.new(name=name)
+        draw(blk)
+        blk.add_attdef("ELEV", (0.7, 0.3), dxfattribs={"height": 0.5, "layer": "0", "style": self.style})
+        blk.add_attdef("CODE", (0.7, -0.5), dxfattribs={"height": 0.35, "layer": "0", "style": self.style,
+                                                          "flags": 1})  # invisible
+
+    def _define_blocks(self):
+        # Unit-size symbols (≈1 drawing unit), scaled at insert by the drawing scale.
+        # Strict mode forbids CIRCLE entities, so circles are drawn as closed polylines.
+        def circ(b, r, c=(0, 0)):
+            if self.strict:
+                b.add_lwpolyline([(c[0] + r * math.cos(t * math.pi / 12), c[1] + r * math.sin(t * math.pi / 12))
+                                  for t in range(24)], close=True)
+            else:
+                b.add_circle(c, r)
+
+        self._sym("SYM_SPOT", lambda b: (b.add_line((-0.25, 0), (0.25, 0)), b.add_line((0, -0.25), (0, 0.25))))
+        self._sym("SYM_POLE", lambda b: (circ(b, 0.3), b.add_line((-0.3, 0), (0.3, 0)), b.add_line((0, -0.3), (0, 0.3))))
+
+        def tree(b):
+            circ(b, 0.5)
+            circ(b, 0.08)
+            for k in range(8):
+                a = k * math.pi / 4
+                b.add_line((0.5 * math.cos(a), 0.5 * math.sin(a)), (0.65 * math.cos(a), 0.65 * math.sin(a)))
+        self._sym("SYM_TREE", tree)
+        self._sym("SYM_MH", lambda b: (b.add_lwpolyline([(-0.3, -0.3), (0.3, -0.3), (0.3, 0.3), (-0.3, 0.3)], close=True),
+                                       b.add_line((-0.3, -0.3), (0.3, 0.3)), b.add_line((-0.3, 0.3), (0.3, -0.3))))
+        self._sym("SYM_HYD", lambda b: (circ(b, 0.3), circ(b, 0.12)))
+        self._sym("SYM_SIGN", lambda b: (b.add_lwpolyline([(-0.3, 0), (0.3, 0), (0, 0.5)], close=True),
+                                         b.add_line((0, 0), (0, -0.3))))
+        self._sym("SYM_GCP", lambda b: (b.add_lwpolyline([(-0.4, -0.25), (0.4, -0.25), (0, 0.45)], close=True),
+                                        circ(b, 0.05)))
+        if "LBL_TEXT" not in self.doc.blocks:   # label block: the only way to put text in strict mode
+            blk = self.doc.blocks.new(name="LBL_TEXT")
+            blk.add_attdef("TEXT", (0, 0), dxfattribs={"height": 1.0, "layer": "0", "style": self.style})
+
+    def insert(self, blk, layer, pos, scale, elev=None, code=None, name=None, text=None):
+        if blk not in self.doc.blocks:
+            blk = "SYM_SPOT"
+        ref = self.msp.add_blockref(blk, pos, dxfattribs={"layer": layer, "xscale": scale, "yscale": scale,
+                                                           "zscale": scale})
+        values = {}
+        for ad in self.doc.blocks[blk].attdefs():
+            tag = ad.dxf.tag
+            up = tag.upper()
+            if up in ELEV_TAGS:
+                values[tag] = f"{(MISSING if elev is None else elev):.2f}"
+            elif up in CODE_TAGS and code is not None:
+                values[tag] = code
+            elif up in NAME_TAGS and name is not None:
+                values[tag] = name
+            elif up in TEXT_TAGS and text is not None:
+                values[tag] = text
+            else:
+                values[tag] = ad.dxf.text if ad.dxf.text else (str(int(MISSING)) if self.strict else "")
+        if values:
+            ref.add_auto_attribs(values)
+        return ref
+
+    def label(self, text, pos, h, layer, rotation=0.0, style=None, align=TextEntityAlignment.BOTTOM_LEFT):
+        if self.strict:
+            ref = self.msp.add_blockref("LBL_TEXT", pos, dxfattribs={"layer": layer, "xscale": h, "yscale": h,
+                                                                      "rotation": rotation})
+            ref.add_auto_attribs({"TEXT": text})
+        else:
+            self.msp.add_text(text, height=h, rotation=rotation,
+                              dxfattribs={"layer": layer, "style": style or self.style}).set_placement(pos, align=align)
+
+    # ---------------------------------------------------------------- content
+    def write(self, features, contours, spots, ortho_ref, checks):
+        codes = codes_by_key(self.p["codes"])
+        msp, sym = self.msp, self.sym
+        if ortho_ref:
+            img_path, (w, h), ins, size = ortho_ref
+            image_def = self.doc.add_image_def(filename=img_path, size_in_pixel=(w, h))
+            img = msp.add_image(image_def, insert=ins, size_in_units=size, rotation=0,
+                                dxfattribs={"layer": self.L("ORTHO") if not self.strict else self.opt["ignore_layer"]})
+            img.dxf.flags = 1 | 2 | 8
+
+        n = 0
+        for f in features:
+            c = codes.get(f["code"])
+            if not c:
+                continue
+            layer = c["layer"]
+            pts = [(p[0], p[1], p[2] if len(p) > 2 and p[2] is not None else (MISSING if self.strict else 0.0))
+                   for p in f["coords"]]
+            if f["geom"] == "point":
+                e, nn, z = pts[0]
+                self.insert(c.get("block") or "SYM_SPOT", layer, (e, nn, z), sym, elev=z, code=f["code"],
+                            text=f.get("text"))
+                if not self.strict:
+                    msp.add_point((e, nn, z), dxfattribs={"layer": self.L("TOPO-POINTS")})
+            else:
+                msp.add_polyline3d(pts, close=f["geom"] == "polygon", dxfattribs={"layer": layer})
+            if f.get("text") and f["geom"] != "point":
+                e, nn, _ = pts[0]
+                self.label(f["text"], (e, nn + self.txt_h), self.txt_h, self.L("TOPO-TEXT"), style=self.hstyle)
+            n += 1
+
+        spot_code = codes.get("SPOT", {"layer": "TOPO-SPOT", "block": "SYM_SPOT"})
+        for e, nn, z in spots or []:
+            self.insert(spot_code.get("block") or "SYM_SPOT", spot_code["layer"], (e, nn, z), sym, elev=z, code="SPOT")
+            if not self.strict:
+                msp.add_point((e, nn, z), dxfattribs={"layer": self.L("TOPO-POINTS")})
+
+        for cl in contours or []:
+            layer = self.L("TOPO-CONTOUR-MAJOR" if cl["major"] else "TOPO-CONTOUR-MINOR")
+            if self.strict:   # 3D polyline with Z on every vertex
+                msp.add_polyline3d([(x, y, cl["z"]) for x, y in cl["coords"]], dxfattribs={"layer": layer})
+            else:
+                msp.add_lwpolyline(cl["coords"], dxfattribs={"layer": layer, "elevation": cl["z"]})
+            if cl["major"] and len(cl["coords"]) > 10:
+                i = len(cl["coords"]) // 2
+                (x1, y1), (x2, y2) = cl["coords"][i - 1], cl["coords"][i + 1]
+                ang = math.degrees(math.atan2(y2 - y1, x2 - x1))
+                if ang > 90 or ang < -90:
+                    ang += 180
+                self.label(f"{cl['z']:.1f}", tuple(cl["coords"][i]), self.txt_h * 0.9, self.L("TOPO-CONTOUR-TEXT"),
+                           rotation=ang, align=TextEntityAlignment.MIDDLE_CENTER)
+
+        gcp_code = codes.get("GCP", {"layer": "SURV-CONTROL", "block": "SYM_GCP"})
+        for ck in checks or []:
+            if ck.get("measured") is None:
+                continue
+            e, nn, z = ck["E"], ck["N"], ck["H"]
+            layer = self.L("SURV-CHECK") if ck["kind"] == "check" else gcp_code["layer"]
+            self.insert(gcp_code.get("block") or "SYM_GCP", layer, (e, nn, z), sym, elev=z, code=ck["kind"].upper(),
+                        name=ck["name"])
+            self.label(ck["name"], (e + sym, nn - sym), self.txt_h, layer, align=TextEntityAlignment.TOP_LEFT)
+
+        bounds = self.p.get("bounds")
+        if bounds:
+            self._grid(bounds)
+            self._title_block(bounds)
+        return n
+
+    def _grid(self, bounds):
+        step = 50 if self.scale <= 500 else 100
+        left, bottom, right, top = bounds
+        h = self.txt_h
+        cross = 1.5 * h
+        lay = self.L("SURV-GRID")
+        e = math.ceil(left / step) * step
+        while e <= right:
+            n = math.ceil(bottom / step) * step
+            while n <= top:
+                self.msp.add_line((e - cross, n), (e + cross, n), dxfattribs={"layer": lay})
+                self.msp.add_line((e, n - cross), (e, n + cross), dxfattribs={"layer": lay})
+                self.label(f"{int(e)}", (e - h * 0.3, n + cross * 1.2), h * 0.8, lay, rotation=90)
+                self.label(f"{int(n)}", (e + cross * 1.2, n + h * 0.3), h * 0.8, lay)
+                n += step
+            e += step
+
+    def _title_block(self, bounds):
+        p, k, h = self.p, self.k, self.txt_h
+        meta = p.get("meta", {})
+        lay = self.opt["ignore_layer"] if self.strict else self.L("SURV-TITLE")
+        left, bottom, right, top = bounds
+        w, hh = 120 * k, 60 * k
+        x0, y0 = right + 10 * k, bottom
+        self.msp.add_lwpolyline([(x0, y0), (x0 + w, y0), (x0 + w, y0 + hh), (x0, y0 + hh)], close=True,
+                                dxfattribs={"layer": lay})
+        lines = [
+            ("פרויקט", p.get("name", "")),
+            ("מזמין", meta.get("client", "")),
+            ("גוש / חלקה", meta.get("parcel", "")),
+            ("מודד מוסמך", meta.get("surveyor", "")),
+            ("מס' רישיון", meta.get("license", "")),
+            ("תאריך מדידה", meta.get("date") or datetime.date.today().isoformat()),
+            ("קנ\"מ", f"1:{int(p.get('scale', 250))}"),
+            ("רשת קואורדינטות", "רשת ישראל החדשה (ITM)" if p.get("epsg") == 2039 else f"EPSG:{p.get('epsg')}"),
+            ("גובה", meta.get("datum") or "גובה אורתומטרי מעל פני הים"),
+            ("שיטה", "פוטוגרמטריה מרחפן"),
+        ]
+        if self.strict:
+            for i, (a, b) in enumerate(lines):
+                self.label(f"{a}: {b}", (x0 + w - 2 * k, y0 + hh - (i + 1) * h * 1.8), h * 1.1, lay,
+                           align=TextEntityAlignment.BOTTOM_RIGHT)
+        else:
+            mt = self.msp.add_mtext("\\P".join(f"{a}: {b}" for a, b in lines),
+                                    dxfattribs={"layer": lay, "style": self.hstyle, "char_height": h * 1.1,
+                                                "width": w - 4 * k})
+            mt.set_location((x0 + w - 2 * k, y0 + hh - 2 * k), attachment_point=3)
+        ax, ay = x0 + 12 * k, y0 + hh + 15 * k
+        self.msp.add_lwpolyline([(ax, ay), (ax - 3 * k, ay - 10 * k), (ax, ay - 7 * k), (ax + 3 * k, ay - 10 * k)],
+                                close=True, dxfattribs={"layer": lay})
+        self.label("N", (ax, ay + 2 * k), h * 2, lay, align=TextEntityAlignment.BOTTOM_CENTER)
+
+    def save(self, path):
+        self.doc.saveas(path, encoding="utf-8")
+
+
+def build_dxf(project, features, out_path, contours=None, spots=None, ortho_ref=None, checks=None, template=None):
+    w = Writer(project, template)
+    n = w.write(features, contours, spots, ortho_ref, checks)
+    w.save(out_path)
+    return n
+
+
+def read_template(path):
+    """Layers and blocks (with attribute tags) available in an office template DXF."""
+    doc = ezdxf.readfile(path)
+    layers = [{"name": l.dxf.name, "color": l.dxf.color, "description": getattr(l, "description", "") or ""}
+              for l in doc.layers if l.dxf.name not in ("Defpoints",)]
+    blocks = []
+    for b in doc.blocks:
+        if b.name.startswith("*") or b.is_any_layout:
             continue
-        e, n, z = ck["E"], ck["N"], ck["H"]
-        ref = msp.add_blockref("SYM_GCP", (e, n, z), dxfattribs={"layer": "SURV-CHECK" if ck["kind"] == "check"
-                                                                  else "SURV-CONTROL",
-                                                                  "xscale": sym, "yscale": sym, "zscale": sym})
-        ref.add_auto_attribs({"ELEV": f"{z:.3f}", "CODE": ck["name"]})
-        msp.add_text(ck["name"], height=txt_h, dxfattribs={"layer": "SURV-CHECK", "style": "SURVEY"}
-                     ).set_placement((e + sym, n - sym), align=TextEntityAlignment.TOP_LEFT)
-
-    bounds = project.get("bounds")
-    if bounds:
-        _grid(msp, bounds, scale, txt_h)
-        _title_block(msp, project, bounds, k, txt_h)
-
-    doc.saveas(out_path, encoding="utf-8")
-    return n_written
-
-
-def _grid(msp, bounds, scale, txt_h):
-    step = 50 if scale <= 500 else 100
-    left, bottom, right, top = bounds
-    cross = 1.5 * txt_h
-    e = math.ceil(left / step) * step
-    while e <= right:
-        n = math.ceil(bottom / step) * step
-        while n <= top:
-            msp.add_line((e - cross, n), (e + cross, n), dxfattribs={"layer": "SURV-GRID"})
-            msp.add_line((e, n - cross), (e, n + cross), dxfattribs={"layer": "SURV-GRID"})
-            msp.add_text(f"{int(e)}", height=txt_h * 0.8, rotation=90, dxfattribs={"layer": "SURV-GRID",
-                                                                                  "style": "SURVEY"}
-                         ).set_placement((e - txt_h * 0.3, n + cross * 1.2), align=TextEntityAlignment.BOTTOM_LEFT)
-            msp.add_text(f"{int(n)}", height=txt_h * 0.8, dxfattribs={"layer": "SURV-GRID", "style": "SURVEY"}
-                         ).set_placement((e + cross * 1.2, n + txt_h * 0.3), align=TextEntityAlignment.BOTTOM_LEFT)
-            n += step
-        e += step
-
-
-def _title_block(msp, project, bounds, k, txt_h):
-    meta = project.get("meta", {})
-    left, bottom, right, top = bounds
-    w, h = 120 * k, 60 * k
-    x0, y0 = right + 10 * k, bottom
-    msp.add_lwpolyline([(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)], close=True,
-                       dxfattribs={"layer": "SURV-TITLE"})
-    lines = [
-        ("פרויקט", project.get("name", "")),
-        ("מזמין", meta.get("client", "")),
-        ("גוש / חלקה", meta.get("parcel", "")),
-        ("מודד מוסמך", meta.get("surveyor", "")),
-        ("מס' רישיון", meta.get("license", "")),
-        ("תאריך מדידה", meta.get("date", datetime.date.today().isoformat())),
-        ("קנ\"מ", f"1:{int(project.get('scale', 250))}"),
-        ("רשת קואורדינטות", "רשת ישראל החדשה (ITM)" if project.get("epsg") == 2039 else f"EPSG:{project.get('epsg')}"),
-        ("גובה", meta.get("datum", "גובה אורתומטרי מעל פני הים")),
-        ("שיטה", "פוטוגרמטריה מרחפן"),
-    ]
-    text = "\\P".join(f"{a}: {b}" for a, b in lines)
-    mt = msp.add_mtext(text, dxfattribs={"layer": "SURV-TITLE", "style": "HEBREW", "char_height": txt_h * 1.1,
-                                         "width": w - 4 * k})
-    mt.set_location((x0 + w - 2 * k, y0 + h - 2 * k), attachment_point=3)  # top-right, RTL friendly
-    # north arrow
-    ax, ay = x0 + 12 * k, y0 + h + 15 * k
-    msp.add_lwpolyline([(ax, ay), (ax - 3 * k, ay - 10 * k), (ax, ay - 7 * k), (ax + 3 * k, ay - 10 * k)],
-                       close=True, dxfattribs={"layer": "SURV-TITLE"})
-    msp.add_text("N", height=txt_h * 2, dxfattribs={"layer": "SURV-TITLE", "style": "SURVEY"}
-                 ).set_placement((ax, ay + 2 * k), align=TextEntityAlignment.BOTTOM_CENTER)
+        blocks.append({"name": b.name, "attribs": [a.dxf.tag for a in b.attdefs()]})
+    return {"layers": layers, "blocks": blocks, "dxfversion": doc.dxfversion}
 
 
 def write_pnezd_csv(features, spots, out_path):

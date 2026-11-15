@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 import raster
 from codes import load_codes, codes_by_key
-from dxf_export import build_dxf, write_pnezd_csv
+from dxf_export import build_dxf, write_pnezd_csv, read_template, default_options
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("DSC_DATA", os.path.join(ROOT, "data"))
@@ -376,7 +376,7 @@ def generated(pid: str):
 def export_dxf(pid: str):
     proj = load(pid)
     out = os.path.join(pdir(pid), "drawing.dxf")
-    build_dxf(proj, proj["features"], out, proj["contours"], proj["spots"], None, proj["control"])
+    build_dxf(proj, proj["features"], out, proj["contours"], proj["spots"], None, proj["control"], template_path(pid))
     return FileResponse(out, filename=f"{_safe(proj['name'])}.dxf", media_type="application/dxf")
 
 
@@ -393,7 +393,8 @@ def export_zip(pid: str):
             w, h, ins, size = raster.export_ortho_jpeg(raster_path(pid, "ortho"), jpg)
             ortho_ref = (os.path.basename(jpg), (w, h), ins, size)
         build_dxf(proj, proj["features"], os.path.join(work, f"{name}.dxf"), proj["contours"], proj["spots"],
-                  ortho_ref, proj["control"])
+                  ortho_ref, proj["control"], template_path(pid))
+        _try_dwg(os.path.join(work, f"{name}.dxf"))
         write_pnezd_csv(proj["features"], proj["spots"], os.path.join(work, f"{name}_points_PNEZD.csv"))
         with open(os.path.join(work, f"{name}_accuracy.txt"), "w", encoding="utf-8") as f:
             f.write(_accuracy_report(proj, accuracy(pid)))
@@ -421,6 +422,159 @@ def _accuracy_report(proj, acc):
     for r in acc["points"]:
         lines.append(f"{r['name']},{r['kind']},{r['E']},{r['N']},{r['H']},{r.get('dE')},{r.get('dN')},{r.get('dH')}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------- office CAD template / standards
+def template_path(pid):
+    p = os.path.join(pdir(pid), "template.dxf")
+    return p if os.path.exists(p) else None
+
+
+def _odafc():
+    """ODA File Converter (free) enables DWG in/out when installed."""
+    try:
+        from ezdxf.addons import odafc
+        return odafc if odafc.is_installed() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _try_dwg(dxf_path):
+    oda = _odafc()
+    if not oda:
+        return None
+    try:
+        doc = ezdxf_read(dxf_path)
+        out = dxf_path[:-4] + ".dwg"
+        oda.export_dwg(doc, out, version="R2018", replace=True)
+        return out
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ezdxf_read(path):
+    import ezdxf
+    return ezdxf.readfile(path)
+
+
+@app.post("/api/projects/{pid}/template")
+def upload_template(pid: str, file: UploadFile = File(...)):
+    """Office template: DXF (or DWG when ODA File Converter is installed)."""
+    d = pdir(pid)
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    tmp = os.path.join(d, "template_upload" + ext)
+    with open(tmp, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    dst = os.path.join(d, "template.dxf")
+    try:
+        if ext == ".dwg":
+            oda = _odafc()
+            if not oda:
+                raise HTTPException(400, "קובץ DWG דורש התקנת ODA File Converter (חינמי). לחלופין: באוטוקאד SAVEAS ← DXF והעלה את קובץ ה-DXF.")
+            oda.readfile(tmp).saveas(dst)
+        else:
+            shutil.copyfile(tmp, dst)
+        info = read_template(dst)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        if os.path.exists(dst):
+            os.unlink(dst)
+        raise HTTPException(400, f"לא ניתן לקרוא את התבנית: {e}")
+    finally:
+        os.unlink(tmp)
+    with _lock:
+        proj = load(pid)
+        proj["template"] = {"name": file.filename, **{k: len(v) for k, v in info.items() if isinstance(v, list)}}
+        _automap(proj, info)
+        save(pid, proj)
+    return {**info, "codes": proj["codes"]}
+
+
+def _automap(proj, info):
+    """Map codes to template layers/blocks whose name or description mentions the code or its label."""
+    layers = info["layers"]
+    blocks = {b["name"].upper(): b["name"] for b in info["blocks"]}
+    for c in proj["codes"]:
+        if c["layer"] in {l["name"] for l in layers}:
+            continue
+        words = [c["code"].lower()] + [w for w in c["label"].replace("/", " ").split() if len(w) > 2]
+        for l in layers:
+            hay = (l["name"] + " " + l["description"]).lower()
+            if any(w.lower() in hay for w in words):
+                c["layer"] = l["name"]
+                if l["name"].upper() in blocks and c["geom"] == "point":
+                    c["block"] = blocks[l["name"].upper()]
+                break
+
+
+@app.get("/api/projects/{pid}/template")
+def get_template(pid: str):
+    t = template_path(pid)
+    return read_template(t) if t else {"layers": [], "blocks": []}
+
+
+@app.delete("/api/projects/{pid}/template")
+def delete_template(pid: str):
+    t = template_path(pid)
+    if t:
+        os.unlink(t)
+    with _lock:
+        proj = load(pid)
+        proj.pop("template", None)
+        proj["codes"] = load_codes()
+        save(pid, proj)
+    return {"ok": True}
+
+
+class CodePatch(BaseModel):
+    code: str
+    layer: str | None = None
+    block: str | None = None
+    color: int | None = None
+
+
+@app.patch("/api/projects/{pid}/codes")
+def patch_codes(pid: str, items: list[CodePatch]):
+    with _lock:
+        proj = load(pid)
+        codes = codes_by_key(proj["codes"])
+        for it in items:
+            c = codes.get(it.code)
+            if not c:
+                continue
+            if it.layer:
+                c["layer"] = it.layer
+            if it.block is not None:
+                c["block"] = it.block or None
+            if it.color is not None:
+                c["color"] = it.color
+        save(pid, proj)
+    return proj["codes"]
+
+
+class CadOptions(BaseModel):
+    strict: bool | None = None
+    ignore_layer: str | None = None
+    layer_map: dict | None = None
+
+
+@app.patch("/api/projects/{pid}/cad")
+def patch_cad(pid: str, body: CadOptions):
+    with _lock:
+        proj = load(pid)
+        cad = {**default_options(), **proj.get("cad", {})}
+        cad.update(body.model_dump(exclude_none=True))
+        proj["cad"] = cad
+        save(pid, proj)
+    return {**cad, "dwg_available": _odafc() is not None}
+
+
+@app.get("/api/projects/{pid}/cad")
+def get_cad(pid: str):
+    proj = load(pid)
+    return {**default_options(), **proj.get("cad", {}), "dwg_available": _odafc() is not None,
+            "template": proj.get("template")}
 
 
 # ---------------------------------------------------------------- photogrammetry (NodeODM)

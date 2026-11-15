@@ -104,3 +104,45 @@ def test_full_workflow(client, tmp_path):
     names = z.namelist()
     assert any(n.endswith(".dxf") for n in names) and any(n.endswith(".jgw") for n in names)
     assert any(n.endswith("_PNEZD.csv") for n in names) and any(n.endswith("_accuracy.txt") for n in names)
+
+
+def test_template_and_strict_mode(client, tmp_path):
+    c, s = client, client.sample
+    pid = c.post("/api/projects", json={"name": "תבנית"}).json()["id"]
+    for kind in ("ortho", "dtm"):
+        with open(s / f"{kind}.tif", "rb") as f:
+            c.post(f"/api/projects/{pid}/upload/{kind}", files={"file": (f"{kind}.tif", f)})
+    # office template: numeric layer for buildings, own tree block with HEIGHT attribute, sample junk in msp
+    tpl = ezdxf.new("R2013")
+    tpl.layers.add("2301").description = "מבנה"
+    tpl.layers.add("OFFICE-TREES").description = "עצים"
+    b = tpl.blocks.new("TREE_B")
+    b.add_lwpolyline([(0, 0), (1, 0), (1, 1)], close=True)
+    b.add_attdef("HEIGHT", (0, 0))
+    b.add_attdef("SPECIES", (0, -1), text="?")
+    tpl.modelspace().add_line((0, 0), (1, 1))
+    tp = tmp_path / "office.dxf"
+    tpl.saveas(tp)
+    with open(tp, "rb") as f:
+        r = c.post(f"/api/projects/{pid}/template", files={"file": ("office.dxf", f)}).json()
+    codes = {x["code"]: x for x in r["codes"]}
+    assert codes["BLDG"]["layer"] == "2301"
+    c.patch(f"/api/projects/{pid}/codes", json=[{"code": "TREE", "layer": "OFFICE-TREES", "block": "TREE_B"}])
+    c.patch(f"/api/projects/{pid}/cad", json={"strict": True})
+    c.post(f"/api/projects/{pid}/features", json={"code": "BLDG", "geom": "polygon",
+           "coords": [[180070, 665040], [180085, 665040], [180085, 665028]]})
+    c.post(f"/api/projects/{pid}/features", json={"code": "TREE", "geom": "point", "coords": [[180015, 665080]],
+                                                   "text": "אורן"})
+    c.post(f"/api/projects/{pid}/generate", json={"spot_spacing": 20, "contour_interval": 1})
+    out = tmp_path / "strict.dxf"
+    out.write_bytes(c.get(f"/api/projects/{pid}/export.dxf").content)
+    doc = ezdxf.readfile(out)
+    msp = doc.modelspace()
+    assert not msp.query("POINT TEXT MTEXT CIRCLE")
+    assert len(msp.query('LINE[layer=="0"]')) == 0 and len(msp.query('*[layer=="0"]')) == 0
+    assert doc.header["$LUPREC"] == 6 and "HEBTXT" in doc.styles
+    assert len(msp.query('POLYLINE[layer=="2301"]')) == 1
+    tree = msp.query('INSERT[layer=="OFFICE-TREES"]')[0]
+    assert tree.dxf.name == "TREE_B" and float(tree.get_attrib_text("HEIGHT")) > 30
+    assert tree.get_attrib_text("SPECIES") == "?"
+    assert not doc.audit().has_errors

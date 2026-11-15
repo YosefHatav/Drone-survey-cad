@@ -27,6 +27,7 @@
       <button data-tab="control">בקרה ודיוק</button>
       <button data-tab="auto">רומים וקווי גובה</button>
       <button data-tab="meta">פרטי מפה</button>
+      <button data-tab="cad">תבנית ותקן</button>
     </nav>
 
     <section id="tab-draw" class="tab active">
@@ -89,6 +90,17 @@
       <label>תאריך מדידה <input id="mDate" type="date" data-meta="date"></label>
       <label>מקור גובה <input id="mDatum" data-meta="datum" placeholder="גובה אורתומטרי מעל פני הים"></label>
       <button id="btnSaveMeta" class="primary">שמור</button>
+    </section>
+    <section id="tab-cad" class="tab">
+      <p class="small">טען קובץ תבנית של המשרד (DXF, או DWG אם מותקן ODA File Converter). השרטוט ייוצא לתוך התבנית: השכבות, הבלוקים וסגנונות הטקסט שלה יישמרו. סימבולים ממופים לבלוקים של התבנית, ותכונת הגובה (ELEV/Z/H/גובה/רום) ממולאת אוטומטית.</p>
+      <label class="file">קובץ תבנית (DXF / DWG)<input id="tplFile" type="file" accept=".dxf,.dwg"></label>
+      <div id="tplInfo" class="small"></div>
+      <label class="chk"><input id="cadStrict" type="checkbox"> מצב תאימות מבא"ת / מפרט מיפוי לאומי</label>
+      <p class="small">במצב זה: ללא ישויות POINT/TEXT/CIRCLE (כל כיתוב בתוך בלוק), צבעים ByLayer, גופן HEBTXT, דיוק של 6 ספרות, הערך ‎-444 לנתון חסר, ומסגרת, כותרת וחץ צפון בשכבת התעלם.</p>
+      <label>שכבת התעלם (לא מודפסת) <input id="cadIgnore" value="1201"></label>
+      <h4>מיפוי קודים לשכבות</h4>
+      <table id="mapTable" class="tbl"></table>
+      <button id="btnSaveMap" class="primary">שמור מיפוי</button>
     </section>
   </aside>
 
