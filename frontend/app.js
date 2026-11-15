@@ -265,7 +265,7 @@ function renderGenerated(g) {
 }
 function updateLabels() {
   if (!genLayer || !genLayer._spots) return;
-  const show = map.getZoom() >= 1 && genLayer._spots.length < 4000;
+  const show = map.getZoom() >= 2 && genLayer._spots.length < 4000;
   genLayer._spots.forEach(m => { if (show && map.hasLayer(genLayer)) m._label.addTo(map); else m._label.remove(); });
 }
 
