@@ -29,6 +29,26 @@ NODEODM_URL = os.environ.get("NODEODM_URL", "http://localhost:3000")
 os.makedirs(DATA, exist_ok=True)
 
 app = FastAPI(title="Drone Survey CAD")
+APP_PASSWORD = os.environ.get("APP_PASSWORD")
+
+
+@app.middleware("http")
+async def basic_auth(request, call_next):
+    """Optional shared password (set APP_PASSWORD) for hosted deployments. Any user name works."""
+    if APP_PASSWORD and request.url.path != "/api/codes":  # left open for the health check
+        import base64
+        import secrets
+        ok = False
+        h = request.headers.get("authorization", "")
+        if h.startswith("Basic "):
+            try:
+                pw = base64.b64decode(h[6:]).decode("utf-8").split(":", 1)[1]
+                ok = secrets.compare_digest(pw, APP_PASSWORD)
+            except Exception:  # noqa: BLE001
+                ok = False
+        if not ok:
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="drone-survey-cad"'})
+    return await call_next(request)
 _lock = threading.Lock()
 
 

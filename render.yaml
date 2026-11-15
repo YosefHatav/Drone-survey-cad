@@ -5,3 +5,6 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /api/codes
+    envVars:
+      - key: APP_PASSWORD
+        sync: false   # Render asks for the value when the blueprint is applied
