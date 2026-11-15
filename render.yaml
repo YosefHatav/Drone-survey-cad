@@ -1,0 +1,7 @@
+# Render.com blueprint: New > Blueprint > choose this repo
+services:
+  - type: web
+    name: drone-survey-cad
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/codes
