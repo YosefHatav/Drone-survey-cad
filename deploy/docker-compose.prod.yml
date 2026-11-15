@@ -1,0 +1,24 @@
+# Production: app + Caddy (automatic HTTPS certificate for your domain)
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    environment:
+      - APP_PASSWORD=${APP_PASSWORD}
+      - NODEODM_URL=http://nodeodm:3000
+      - DSC_DATA=/data
+    volumes: ["../data:/data"]
+  nodeodm:
+    image: opendronemap/nodeodm:latest
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+volumes:
+  caddy_data:

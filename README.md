@@ -63,3 +63,11 @@ python -m pytest tests -q
 - אין עדיין חילוץ קווים אוטומטי (AI). השרטוט נעשה ידנית, וזה השלב הבא במפת הדרכים.
 - גובה מתחת לצמחייה צפופה לא אמין אם אין DTM.
 - כיתובים בעברית ב־DXF מוגדרים בגופן David או Arial. כדאי לבדוק את התצוגה בגרסת האוטוקאד של המשרד.
+
+## אתר בדומיין משלך (שרת פרטי)
+1. שוכרים שרת Ubuntu (VPS) עם 4GB זיכרון ומעלה, ומפנים את רשומת ה־A של הדומיין לכתובת ה־IP שלו.
+2. מתחברים לשרת ב־SSH ומריצים:
+```bash
+curl -fsSL https://raw.githubusercontent.com/YosefHatav/Drone-survey-cad/main/deploy/install.sh | bash -s -- survey.example.co.il  הסיסמה-שלך
+```
+הסקריפט מתקין Docker, את האפליקציה, את שרת העיבוד OpenDroneMap ותעודת HTTPS אוטומטית (Caddy). לעדכון גרסה מריצים `/opt/drone-survey-cad/deploy/update.sh`.
